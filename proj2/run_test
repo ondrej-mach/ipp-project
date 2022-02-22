@@ -1,0 +1,2 @@
+#!/bin/sh
+php test.php --recursive --directory=../../ipp-2022-tests --parse-script=../proj1/parse.php --int-script=interpret.py
