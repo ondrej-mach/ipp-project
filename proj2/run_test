@@ -1,2 +1,10 @@
 #!/bin/sh
-php test.php --recursive --directory=../../ipp-2022-tests --parse-script=../proj1/parse.php --int-script=interpret.py
+
+# parse only test
+php test.php --recursive --noclean --parse-script=../proj1/parse.php --directory=../../ipp-2022-tests/parse-only/ --jexampath=. --parse-only >parse-only.html
+
+# integration test
+php test.php --recursive --noclean --parse-script=../proj1/parse.php --int-script=interpret.py --directory=../../ipp-2022-tests/both/ > integration.html
+
+# interpreter test set is garbage
+php test.php --recursive --noclean --int-script=interpret.py --directory=../../ipp-2022-tests/interpret-only/ --int-only > int-only.html

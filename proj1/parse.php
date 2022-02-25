@@ -1,5 +1,9 @@
 <?php
 
+const ERR_BADARG = 10;
+const ERR_INFILE = 11;
+const ERR_OUTFILE = 12;
+
 const ERR_HEADER = 21;
 const ERR_OPCODE = 22;
 const ERR_LEXSYN = 23;
@@ -10,7 +14,7 @@ function usage() {
     echo "XD";
 }
 
-// retruns [parsed, type]
+// returns [parsed, type]
 // parsed is the argument in output format
 // type can be: int, bool, string, nil, label, type, var
 function parseArgument($str, $nt) {
@@ -21,7 +25,10 @@ function parseArgument($str, $nt) {
         $parsed = $parts[0];
 
         if ($nt == 'label') {
-            // check validity?
+            if (!preg_match('/^[a-zA-Z\-_$&%*!?][a-zA-Z0-9\-_$&%*!?]*$/', $parts[0])) {
+                fwrite(STDERR, "`$parts[0]` is not a legal label.\n");
+                exit(ERR_LEXSYN);
+            }
             $type = 'label';
 
         } elseif ($nt == 'type') {
@@ -39,7 +46,6 @@ function parseArgument($str, $nt) {
     } else {
         $context = $parts[0];
 
-        // TODO might check if parsed string is legal for the type
         switch ($context) {
             case 'GF':
             case 'LF':
@@ -47,12 +53,27 @@ function parseArgument($str, $nt) {
                 $type = 'var';
                 $parsed = $parts[0].'@'.$parts[1];
 
-                if (!preg_match('/[a-zA-Z\-_$&%*!?]+/', $parts[1])) {
+                if (!preg_match('/^[a-zA-Z\-_$&%*!?][a-zA-Z0-9\-_$&%*!?]*$/', $parts[1])) {
                     fwrite(STDERR, "`$parts[1]` is not a legal variable identifier.\n");
                     exit(ERR_LEXSYN);
                 }
 
                 if (($nt != 'symb') && ($nt != 'var')) {
+                    fwrite(STDERR, "Expected $nt, got $type.\n");
+                    exit(ERR_LEXSYN);
+                }
+                break;
+
+            case 'int':
+                $type = 'int';
+                $parsed = $parts[1];
+
+                if (!preg_match('/^(\\+|\\-)?[0-9]+$/', $parsed)) {
+                    fwrite(STDERR, "Int cannot have `$parts[1]` value.\n");
+                    exit(ERR_LEXSYN);
+                }
+
+                if ($nt != 'symb') {
                     fwrite(STDERR, "Expected $nt, got $type.\n");
                     exit(ERR_LEXSYN);
                 }
@@ -76,6 +97,25 @@ function parseArgument($str, $nt) {
             case 'string':
                 $type = 'string';
                 $parsed = $parts[1];
+
+                // Check if every escape sequence is valid
+                $escapes = array();
+                $escapesOK = true;
+                if (preg_match_all('/\\\\/', $parsed) == preg_match_all('/\\\\[0-9]{3}/', $parsed, $escapes)) {
+                    foreach ($escapes[0] as $esc) {
+                        $number = substr($esc, 1);
+                        if (intval($number) > 255) {
+                            $escapesOK = false;
+                            break;
+                        }
+                    }
+                } else {
+                    $escapesOK = false;
+                }
+                if (!$escapesOK) {
+                    fwrite(STDERR, "Bad escape sequences in strings\n");
+                    exit(ERR_LEXSYN);
+                }
 
                 if ($nt != 'symb') {
                     fwrite(STDERR, "Expected $nt, got $type.\n");
@@ -147,9 +187,7 @@ class Instruction {
 
             if ($expectedExistence != $actualExistence) {
                 fwrite(STDERR, "Wrong arguments of instruction $this->opcode.\n");
-                //var_dump($this->arglist);
-                //var_dump($args);
-                exit(ERR_HEADER);
+                exit(ERR_LEXSYN);
             }
 
             if ($expectedExistence == false) {
@@ -174,7 +212,7 @@ class Instruction {
 }
 
 
-function parseLine(XMLWriter $xw, string $line) {
+function parseLine(XMLWriter $xw, string $line, bool &$expectingHeader) {
     $instructions = [
         'MOVE' => new Instruction('MOVE', ['var', 'symb']),
         'CREATEFRAME' => new Instruction('CREATEFRAME', []),
@@ -204,7 +242,7 @@ function parseLine(XMLWriter $xw, string $line) {
         'WRITE' => new Instruction('WRITE', ['symb']),
 
         'CONCAT' => new Instruction('CONCAT', ['var', 'symb', 'symb']),
-        'STRLEN' => new Instruction('STRLEN', ['var', 'symb', 'symb']),
+        'STRLEN' => new Instruction('STRLEN', ['var', 'symb']),
         'GETCHAR' => new Instruction('GETCHAR', ['var', 'symb', 'symb']),
         'SETCHAR' => new Instruction('SETCHAR', ['var', 'symb', 'symb']),
 
@@ -232,12 +270,22 @@ function parseLine(XMLWriter $xw, string $line) {
     $parts = preg_split('/\s+/', $line);
     $opcode = strtoupper($parts[0]);
 
+    if ($expectingHeader) {
+        if (strcasecmp($opcode, '.IPPcode22') == 0) {
+            $expectingHeader = 0;
+            return;
+        } else {
+            fwrite(STDERR, "Unexpected header `$opcode`.\n");
+            exit(ERR_HEADER);
+        }
+    }
+
     // If there is an instruction on this line
     if (array_key_exists($opcode, $instructions)) {
         $instructions[$opcode]->generateXML($xw, $parts);
     } else {
         fwrite(STDERR, "Opcode `$opcode` does not exist.\n");
-        exit(ERR_LEXSYN);
+        exit(ERR_OPCODE);
     }
 }
 
@@ -251,18 +299,14 @@ function parseInput($inFile) {
 
     // language attribute
     $xw->startAttribute('language');
-    $firstLine = stream_get_line($inFile, 0, "\n");
-    if (strcasecmp($firstLine, '.IPPcode22') == 0) {
-        $xw->text('IPPcode22');
-    } else {
-        fwrite(STDERR, "Unexpected header `$firstLine`.\n");
-        exit(ERR_HEADER);
-    }
+    $xw->text('IPPcode22');
     $xw->endAttribute();
 
+    $expectingHeader = true;
     // parse each line with instruction
-    while($line = stream_get_line($inFile, 0, "\n")) {
-        parseLine($xw, $line);
+    while(!feof($inFile)) {
+        $line = stream_get_line($inFile, 0, "\n");
+        parseLine($xw, $line, $expectingHeader);
     }
 
     // end the document

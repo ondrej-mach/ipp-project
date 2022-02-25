@@ -54,11 +54,6 @@ class RuntimeStringError(InterpretError):
     retval = 58
 
 
-# This error is outside of specification. Only used in cases, that should never happen
-class RuntimeOtherError(InterpretError):
-    retval = 59
-
-
 class Argument:
     def __init__(self, elem: ET.Element):
         self.argtype = elem.attrib['type']
@@ -71,52 +66,63 @@ class Argument:
 
 class Instruction:
     def __init__(self, elem: ET.Element):
-        self.order = int(elem.attrib['order'])
-        self.opcode = elem.attrib['opcode']
+        try:
+            self.order = int(elem.attrib['order'])
+            self.opcode = elem.attrib['opcode'].upper()
 
-        for arg in elem:
-            if arg.tag == 'arg1':
-                self.arg1 = Argument(arg)
-            elif arg.tag == 'arg2':
-                self.arg2 = Argument(arg)
-            elif arg.tag == 'arg3':
-                self.arg3 = Argument(arg)
-            else:
-                raise Exception('Invalid element inside instruction')
+            for arg in elem:
+                if arg.tag == 'arg1':
+                    self.arg1 = Argument(arg)
+                elif arg.tag == 'arg2':
+                    self.arg2 = Argument(arg)
+                elif arg.tag == 'arg3':
+                    self.arg3 = Argument(arg)
+                else:
+                    raise Exception('Invalid element inside instruction')
+        except:
+            raise UnexpectedXMLError()
 
 
 class Symbol:
     normal_types = ['int', 'string', 'bool', 'nil']
     legal_types = normal_types + ['_not_initialized']
 
-    def __init__(self, value=None, symtype=None):
-        # For variable declaration
+    def __init__(self, value=None, symtype=None, interpret=False):
         if value is None and symtype is None:
             self.symtype = '_not_initialized'
 
-        elif symtype == 'string':
-            self.value = re.sub(r'\\[0-9][0-9][0-9]', lambda esc: chr(int(esc.group()[1:])), value)
-            self.symtype = symtype
+        # Constructor from symbols coming directly from XML
+        elif interpret:
+            if symtype == 'string':
+                self.value = re.sub(r'\\[0-9][0-9][0-9]', lambda esc: chr(int(esc.group()[1:])), value)
+                self.symtype = symtype
 
-        elif symtype == 'int':
-            self.value = int(value)
-            self.symtype = symtype
+            elif symtype == 'int':
+                self.value = int(value)
+                self.symtype = symtype
 
-        elif symtype == 'bool':
-            self.value = (value.lower() == 'true')
-            self.symtype = symtype
+            elif symtype == 'bool':
+                self.value = (value.lower() == 'true')
+                self.symtype = symtype
 
-        elif symtype == 'nil':
-            if value != 'nil':
-                # not entirely correct, but specification has no error for this
-                RuntimeTypeError()
+            elif symtype == 'nil':
+                if value != 'nil':
+                    # not entirely correct, but specification has no error for this
+                    RuntimeTypeError()
 
-            self.value = 'nil'
-            self.symtype = symtype
+                self.value = 'nil'
+                self.symtype = symtype
 
+            else:
+                raise Exception(f'Non-existent symbol type `{symtype}`')
+
+        # If the symbols are created  internally, there is no need to parse them
         else:
-            raise Exception('Non-existent symbol type')
+            if symtype not in self.normal_types:
+                raise Exception('Internal error')
 
+            self.value = value
+            self.symtype = symtype
 
     # used for WRITE instruction
     def __repr__(self):
@@ -141,18 +147,43 @@ class Symbol:
             raise Exception('Internal error')
 
     def __eq__(self, other):
+        if self.symtype == '_not_initialized' or other.symtype == '_not_initialized':
+            raise RuntimeMissingValueError()
 
+        if self.symtype == other.symtype:
+            return self.value == other.value
+        elif self.symtype == 'nil' or other.symtype == 'nil':
+            return False
+        else:
+            raise RuntimeTypeError()
+
+    def __lt__(self, other):
         if self.symtype == '_not_initialized' or other.symtype == '_not_initialized':
             raise RuntimeMissingValueError()
 
         if self.symtype != other.symtype:
             raise RuntimeTypeError()
 
-        return self.value == other.value
+        if self.symtype == 'nil' or other.symtype == 'nil':
+            raise RuntimeTypeError()
+
+        return self.value < other.value
+
+    def __gt__(self, other):
+        if self.symtype == '_not_initialized' or other.symtype == '_not_initialized':
+            raise RuntimeMissingValueError()
+
+        if self.symtype == 'nil' or other.symtype == 'nil':
+            raise RuntimeTypeError()
+
+        if self.symtype != other.symtype:
+            raise RuntimeTypeError()
+
+        return self.value > other.value
 
 
 class RuntimeEnvironment:
-    def __init__(self, root: ET.Element, input=sys.stdin, output=sys.stdout, error=sys.stderr):
+    def __init__(self, root: ET.Element, output=sys.stdout, error=sys.stderr):
         self.set_vars()
 
         if root.tag != 'program':
@@ -163,11 +194,15 @@ class RuntimeEnvironment:
 
         self.instructions = []
         for inst in root:
+            if inst.tag != 'instruction':
+                raise UnexpectedXMLError()
+
             self.instructions.append(Instruction(inst))
         # Sort instructions according to order attribute
         self.instructions.sort(key=lambda inst: inst.order)
+        self.checkInstructionOrder()
+        self.checkLabels()
 
-        self.input = input
         self.output = output
         self.error = error
 
@@ -176,7 +211,7 @@ class RuntimeEnvironment:
         self.callstack = []
         self.stack = []
         self.gf = dict()  # global frame
-        self.tf = dict()  # temporary frame
+        self.tf = None  # temporary frame
         self.lfstack = []  # stack of local frames
         self.end = False
         self.ret = 0
@@ -194,40 +229,67 @@ class RuntimeEnvironment:
 
         return self.ret
 
-    def getArgValue(self, arg: Argument):
+    def checkLabels(self):
+        self.labels = dict();
+        for index, inst in enumerate(self.instructions):
+            if inst.opcode.upper() == 'LABEL':
+                if inst.arg1.text in self.labels.keys():
+                    raise SemanticError()
+                else:
+                    self.labels[inst.arg1.text] = index
+
+    def checkInstructionOrder(self):
+        if len(self.instructions) > 0:
+            if self.instructions[0].order < 1:
+                raise UnexpectedXMLError()
+
+        for i in range(len(self.instructions) - 1):
+            if self.instructions[i].order == self.instructions[i+1].order:
+                raise UnexpectedXMLError()
+
+    def getArgValue(self, arg: Argument, undef=False):
         if arg.argtype in ['int', 'string', 'bool', 'nil']:
-            value = Symbol(arg.text, arg.argtype)
+            try:
+                value = Symbol(arg.text, arg.argtype, interpret=True)
+            except:
+                raise UnexpectedXMLError()
             return value
 
         elif arg.argtype == 'var':
-            return self.getVariableValue(arg.text)
+            return self.getVariableValue(arg.text, undef=undef)
 
     def variableDeclared(self, name: str):
         frame, varName = name.split('@', 1)
 
-        if frame == 'GF':
-            return varName in self.gf
-        elif frame == 'TF':
-            return varName in self.tf
-        elif frame == 'LF':
-            return varName in self.lfstack[-1]
-        else:
+        try:
+            if frame == 'GF':
+                return varName in self.gf
+            elif frame == 'TF':
+                return varName in self.tf
+            elif frame == 'LF':
+                return varName in self.lfstack[-1]
+            else:
+                raise RuntimeFrameError()
+        except:
             raise RuntimeFrameError()
 
-    def getVariableValue(self, name: str):
+    def getVariableValue(self, name: str, undef=False):
         if not self.variableDeclared(name):
             raise RuntimeVariableError()
 
         frame, varName = name.split('@', 1)
 
         if frame == 'GF':
-            return self.gf[varName]
+            value = self.gf[varName]
         elif frame == 'TF':
-            return self.tf[varName]
+            value = self.tf[varName]
         elif frame == 'LF':
-            return self.lfstack[-1][varName]
-        else:
-            raise RuntimeFrameError()
+            value = self.lfstack[-1][varName]
+
+        if not undef and (value.symtype == '_not_initialized'):
+            raise RuntimeMissingValueError()
+
+        return value;
 
     def setVariableValue(self, name: str, val: Symbol):
         if not self.variableDeclared(name):
@@ -241,13 +303,15 @@ class RuntimeEnvironment:
             self.tf[varName] = val
         elif frame == 'LF':
             self.lfstack[-1][varName] = val
-        else:
-            raise RuntimeFrameError()
 
     def goto(self, label: str):
-        for index, inst in enumerate(self.instructions):
-            if inst.opcode == 'LABEL' and inst.arg1.text == label:
-                self.ip = index
+        try:
+            self.ip = self.labels[label]
+        except:
+            raise SemanticError()
+
+    def labelValid(self, label):
+        return label in self.labels.keys()
 
     def execute(self, inst: Instruction):
         if inst.opcode == 'MOVE':
@@ -255,31 +319,38 @@ class RuntimeEnvironment:
             self.setVariableValue(inst.arg1.text, op)
 
         elif inst.opcode == 'CREATEFRAME':
-            pass
+            self.tf = dict()
 
         elif inst.opcode == 'PUSHFRAME':
-            pass
+            if self.tf is None:
+                raise RuntimeFrameError()
+
+            self.lfstack.append(self.tf)
+            self.tf = None
 
         elif inst.opcode == 'POPFRAME':
-            pass
+            try:
+                self.tf = self.lfstack.pop()
+            except:
+                raise RuntimeFrameError()
 
         elif inst.opcode == 'DEFVAR':
             if self.variableDeclared(inst.arg1.text):
-                raise Exception('Variable already declared')
+                raise SemanticError()
 
             frame, varName = inst.arg1.text.split('@', 1)
 
-            if frame == 'GF':
-                self.gf[varName] = Symbol()
-
-            elif frame == 'TF':
-                self.tf[varName] = Symbol()
-
-            elif frame == 'LF':
-                self.lfstack[-1][varName] = Symbol()
-
-            else:
-                RuntimeFrameError()
+            try:
+                if frame == 'GF':
+                    self.gf[varName] = Symbol()
+                elif frame == 'TF':
+                    self.tf[varName] = Symbol()
+                elif frame == 'LF':
+                    self.lfstack[-1][varName] = Symbol()
+                else:
+                    raise RuntimeFrameError()
+            except:
+                raise RuntimeFrameError()
 
         elif inst.opcode == 'CALL':
             self.callstack.append(self.ip)
@@ -289,13 +360,16 @@ class RuntimeEnvironment:
             try:
                 self.ip = self.callstack.pop()
             except:
-                raise RuntimeFrameError()
+                raise RuntimeMissingValueError()
 
         elif inst.opcode == 'PUSHS':
             self.stack.append(self.getArgValue(inst.arg1))
 
         elif inst.opcode == 'POPS':
-            self.setVariableValue(inst.arg1.text, self.stack.pop())
+            try:
+                self.setVariableValue(inst.arg1.text, self.stack.pop())
+            except IndexError:
+                raise RuntimeMissingValueError()
 
         elif inst.opcode in ['ADD', 'SUB', 'MUL', 'IDIV']:
             op1 = self.getArgValue(inst.arg2)
@@ -358,7 +432,12 @@ class RuntimeEnvironment:
             if op.symtype != 'int':
                 raise RuntimeTypeError()
 
-            self.setVariableValue(inst.arg1.text, Symbol(chr(op.value), 'string'))
+            try:
+                result = chr(op.value)
+            except:
+                raise RuntimeStringError()
+
+            self.setVariableValue(inst.arg1.text, Symbol(result, 'string'))
 
         elif inst.opcode == 'STRI2INT':
             string = self.getArgValue(inst.arg2)
@@ -366,6 +445,9 @@ class RuntimeEnvironment:
 
             if string.symtype != 'string' or pos.symtype != 'int':
                 raise RuntimeTypeError()
+
+            if pos.value < 0:
+                raise RuntimeStringError()
 
             try:
                 result = ord(string.value[pos.value])
@@ -380,25 +462,26 @@ class RuntimeEnvironment:
 
             try:
                 if symtype == 'int':
-                    op = int(self.input.read())
+                    op = int(input())
 
                 elif symtype == 'string':
-                    op = str(self.input.read())
+                    op = str(input())
 
                 elif symtype == 'bool':
-                    op = self.input.read().lower() == 'true'
+                    op = str(input()).lower() == 'true'
 
                 else:
-                    RuntimeOtherError('Cannot read this type')
+                    Exception('Cannot read this type')
 
-            except ValueError:
+            except:
                 op = 'nil'
                 symtype = 'nil'
 
-            self.setVariableValue(inst.arg1.text, Symbol(op, type))
+            result = Symbol(op, symtype, interpret=False)
+            self.setVariableValue(inst.arg1.text, result)
 
         elif inst.opcode == 'WRITE':
-            print(self.getArgValue(inst.arg1), file=self.output)
+            print(self.getArgValue(inst.arg1), file=self.output, end='')
 
         elif inst.opcode == 'CONCAT':
             op1 = self.getArgValue(inst.arg2)
@@ -425,6 +508,9 @@ class RuntimeEnvironment:
             if string.symtype != 'string' or pos.symtype != 'int':
                 raise RuntimeTypeError()
 
+            if pos.value < 0:
+                raise RuntimeStringError()
+
             try:
                 result = string.value[pos.value]
             except:
@@ -440,15 +526,21 @@ class RuntimeEnvironment:
             if dest_str.symtype != 'string' or src_str.symtype != 'string' or dest_pos.symtype != 'int':
                 raise RuntimeTypeError()
 
+            if dest_pos.value < 0:
+                raise RuntimeStringError()
+
             try:
-                dest_str.value[dest_pos.value] = src_str.value[0]
+                modifiable = list(dest_str.value)
+                modifiable[dest_pos.value] = src_str.value[0]
+                dest_str.value = ''.join(modifiable)
             except:
                 raise RuntimeStringError()
 
             self.setVariableValue(inst.arg1.text, dest_str)
 
         elif inst.opcode == 'TYPE':
-            op = self.getArgValue(inst.arg2)
+            op = self.getArgValue(inst.arg2, undef=True)
+
             result = op.symtype if op.symtype in Symbol.normal_types else ''
             self.setVariableValue(inst.arg1.text, Symbol(result, 'string'))
 
@@ -461,6 +553,9 @@ class RuntimeEnvironment:
         elif inst.opcode in ['JUMPIFEQ', 'JUMPIFNEQ']:
             op1 = self.getArgValue(inst.arg2)
             op2 = self.getArgValue(inst.arg3)
+
+            if not self.labelValid(inst.arg1.text):
+                raise SemanticError()
 
             # True or False, according to opcode
             jumpif = inst.opcode == 'JUMPIFEQ'
@@ -475,14 +570,17 @@ class RuntimeEnvironment:
             if op.symtype != 'int':
                 raise RuntimeTypeError()
 
+            if op.value not in range(0, 50):
+                raise RuntimeOperandError()
+
             self.ret = op.value
             self.end = True
 
         elif inst.opcode == 'DPRINT':
-            print(self.getArgValue(inst.arg1), file=self.error)
+            print(self.getArgValue(inst.arg1), file=self.error, end='')
 
         else:
-            raise RuntimeOtherError(f'Invalid opcode `{inst.opcode}`')
+            raise UnexpectedXMLError(f'Invalid opcode `{inst.opcode}`')
 
 
 def main():
@@ -520,11 +618,9 @@ def main():
         sys.stderr.write('Bad program structure.\n')
         return e.retval
 
-    except Exception as e:
-        sys.stderr.write('Unknown error.\n')
-        sys.stderr.write(str(e))
-        return 1
-
+    except AttributeError:
+        sys.stderr.write('Bad program structure.\n')
+        return UnexpectedXMLError.retval
 
 if __name__ == '__main__':
     sys.exit(main())

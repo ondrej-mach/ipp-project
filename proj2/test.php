@@ -1,38 +1,27 @@
-
-
 <?php
 
+const ERR_BADARG = 10;
+const ERR_INFILE = 11;
+const ERR_OUTFILE = 12;
+
+
 function usage() {
-    echo "--help viz společný parametr všech skriptů v sekci 2.2;
-• --directory=path testy bude hledat v zadaném adresáři (chybí-li tento parametr, skript
-prochází aktuální adresář);
-• --recursive testy bude hledat nejen v zadaném adresáři, ale i rekurzivně ve všech jeho
-podadresářích;
---parse-script=file soubor se skriptem v PHP 8.1 pro analýzu zdrojového kódu v IPP-
-code22 (chybí-li tento parametr, implicitní hodnotou je parse.php uložený v aktuálním adre-
-sáři);
-• --int-script=file soubor se skriptem v Python 3.8 pro interpret XML reprezentace kódu
-v IPPcode22 (chybí-li tento parametr, implicitní hodnotou je interpret.py uložený v aktuál-
-ním adresáři);
-• --parse-only bude testován pouze skript pro analýzu zdrojového kódu v IPPcode22 (tento
-parametr se nesmí kombinovat s parametry --int-only a --int-script), výstup s referenčním
-výstupem (soubor s příponou out) porovnávejte nástrojem A7Soft JExamXML (viz [2]);
-• --int-only bude testován pouze skript pro interpret XML reprezentace kódu v IPP-
-code22 (tento parametr se nesmí kombinovat s parametry --parse-only, --parse-script
-a --jexampath). Vstupní program reprezentován pomocí XML bude v souboru s příponou
-src.
-• --jexampath=path cesta k adresáři obsahující soubor jexamxml.jar s JAR balíčkem s ná-
-strojem A7Soft JExamXML a soubor s konfigurací jménem options. Je-li parametr vynechán,
-uvažuje se implicitní umístění /pub/courses/ipp/jexamxml/ na serveru Merlin, kde bude
-test.php hodnocen. Koncové lomítko v path je případně nutno doplnit.
-• --noclean během činnosti test.php nebudou mazány pomocné soubory s mezivýsledky, tj.
-skript ponechá soubory, které vznikají při práci testovaných skriptů (např. soubor s výsledným
-XML po spuštění parse.php atd.)";
+    echo "--help Print this message.
+--directory=path Specify the directory with tests.
+--recursive Search for test in evrery subfolder.
+--parse-script=file The parser PHP script (implicit value is parse.php).
+--int-script=file The interpreter python script (implicit value is interpret.py).
+--parse-only Tests only the parser script. Output is compared using JExamXML. Cannot be combined with --int-only, --int-script.
+--int-only Tests only the parser script. Cannot be combined with --parse-only, --parse-script.
+--jexampath=path Path to folder containing jexamxml.jar (implicit value /pub/courses/ipp/jexamxml/).
+--noclean Temporary files will not be delted after test is done.\n";
 }
 
 
 function expectedFailure($rc) {
-    if ($rc > 20) {
+    if ($rc == 0) {
+        return 'success';
+    } elseif ($rc < 20) {
         return 'unknown';
     } elseif ($rc < 30) {
         return 'parser';
@@ -60,24 +49,47 @@ function checkFiles($path) {
 
 
 function cleanup($path) {
-    if (is_file("$path.xml")){
-        unlink("$path.xml");
-    }
+    $toRemove = ["$path.xml", "$path.int", "$path.err"];
 
-    if (is_file("$path.int")){
-        unlink("$path.int");
+    foreach ($toRemove as $file) {
+        if (is_file("$file")){
+            unlink("$file");
+        }
     }
 }
 
+function getHtmlContents($filename, $heading) {
+    $output = '';
 
+    $contents = file_get_contents($filename);
 
-function diagnoseParserFailure($actual, $expected, &$simpleLog, &$advancedLog) {
+    if ($contents != '') {
+        $output .= '<h5 class="codeheading">'.$heading.'</h5>';
+        $output .= '<p class="codeview" style="color:White">';
+        $output .= nl2br(htmlentities($contents));
+        $output .= '</p>';
+    }
+
+    return $output;
+}
+
+function getErrLog($path) {
+    return getHtmlContents("$path.err", "STDERR of failed component");
+}
+
+function getSrcLog($path) {
+    return getHtmlContents("$path.src", "Source file");
+}
+
+function diagnoseParserFailure($actual, $expected, &$simpleLog, &$advancedLog, $path) {
     if ($actual == $expected) {
         return true;
     } else {
         $ef = expectedFailure($expected);
 
-        if ($ef == 'parser') {
+        if ($ef == 'success') {
+            $simpleLog .= "Parser failed, but program was supposed to run\n";
+        } elseif ($ef == 'parser') {
             $simpleLog .= "Parser failed, but with different exit code\n";
         } elseif ($ef == 'interpreter') {
             $simpleLog .= "Parser failed, but interpreter should have failed\n";
@@ -85,18 +97,23 @@ function diagnoseParserFailure($actual, $expected, &$simpleLog, &$advancedLog) {
             $simpleLog .= "Parser failed, but something else should have failed\n";
         }
 
-        $advancedLog .= "Parser exited with code $actual, but expected return code is $expected\n";
+        $advancedLog .= "<p>Parser exited with code $actual, but expected return code is $expected</p>\n";
+        $advancedLog .= getErrLog($path);
+        $advancedLog .= getSrcLog($path);
+
         return false;
     }
 }
 
-function diagnoseInterpreterFailure($actual, $expected, &$simpleLog, &$advancedLog) {
+function diagnoseInterpreterFailure($actual, $expected, &$simpleLog, &$advancedLog, $path) {
     if ($actual == $expected) {
         return true;
     } else {
         $ef = expectedFailure($expected);
 
-        if ($ef == 'interpreter') {
+        if ($ef == 'success') {
+            $simpleLog .= "Interpreter failed, but program was supposed to run\n";
+        } elseif ($ef == 'interpreter') {
             $simpleLog .= "Interpreter failed, but with different exit code\n";
         } elseif ($ef == 'parser') {
             $simpleLog .= "Interpreter failed, but parser should have failed\n";
@@ -104,9 +121,31 @@ function diagnoseInterpreterFailure($actual, $expected, &$simpleLog, &$advancedL
             $simpleLog .= "Interpreter failed, but something else should have failed\n";
         }
 
-        $advancedLog .= "Interpreter exited with code $retval, but expected return code is $rc";
+        $advancedLog .= "<p>Interpreter exited with code $actual, but expected return code is $expected</p>";
+        $advancedLog .= getErrLog($path);
+        $advancedLog .= getSrcLog($path);
+        $advancedLog .= getHtmlContents("$path.in", "Interpreter STDIN");
+
         return false;
     }
+}
+
+// outsuffix can be xml or int
+function diagnoseCmpFailure($path, $outsuffix, &$simpleLog, &$advancedLog) {
+    $simpleLog .= "The output does not match the reference.";
+
+    $advancedLog .= "<p>The output does not match the reference.</p>";
+    $advancedLog .= '<h5 class="codeheading">Expected output</h5>';
+    $advancedLog .= '<p class="codeview" style="color:lime">';
+    $advancedLog .= nl2br(htmlentities(file_get_contents("$path.out")));
+    $advancedLog .= '</p>';
+
+    $advancedLog .= '<h5 class="codeheading">Actual output</h5>';
+    $advancedLog .= '<p class="codeview" style="color:lightcoral">';
+    $advancedLog .= nl2br(htmlentities(file_get_contents("$path.$outsuffix")));
+    $advancedLog .= '</p>';
+
+    $advancedLog .= getSrcLog($path);
 }
 
 
@@ -121,23 +160,30 @@ function runTest($path, $options, &$simpleLog, &$advancedLog) {
 
     // Parse the ippcode. If int-only is set, skip this stage
     if (!array_key_exists('int-only', $options)) {
-        $cmd = "php ".$options['parse-script']." <$path.src >$path.$xmlsuffix";
+        $cmd = "php ".$options['parse-script']." <$path.src >$path.$xmlsuffix 2>$path.err";
         exec($cmd, $output, $retval);
 
         if ($retval != 0) {
-            return diagnoseParserFailure($retval, $rc, $simpleLog, $advancedLog);
+            return diagnoseParserFailure($retval, $rc, $simpleLog, $advancedLog, $path);
         }
     }
 
     // If this is parse-only, run jexamxml and return
     if (array_key_exists('parse-only', $options)) {
+        // The parser should have failed, but did not
+        if ($rc != 0) {
+            $simpleLog .= "Parser succeeded, but should have failed\n";
+            $advancedLog .= "<p>Parser succeeded, but should have exited with code $rc</p>";
+            $advancedLog .= getSrcLog($path);
+            return false;
+        }
+
         $jexamxml = $options['jexampath'].'/jexamxml.jar';
-        $cmd = "java -jar $jexamxml $path.$xmlsuffix $path.out";
+        $cmd = "java -jar $jexamxml $path.$xmlsuffix $path.out 2>/dev/null";
         exec($cmd, $output, $retval);
 
         if ($retval != 0) {
-            $simpleLog .= "The output does not match the reference.";
-            $advancedLog .= "The output does not match the reference.";
+            diagnoseCmpFailure($path, 'xml', $simpleLog, $advancedLog);
             return false;
         } else {
             return true;
@@ -151,27 +197,31 @@ function runTest($path, $options, &$simpleLog, &$advancedLog) {
         $srcfile = "$path.xml";
     }
 
-    $cmd = "python3 ".$options['int-script']." --source=$srcfile <$path.in >$path.$intsuffix";
+    $cmd = "python3 ".$options['int-script']." --source=$srcfile <$path.in >$path.$intsuffix 2>$path.err";
     exec($cmd, $output, $retval);
 
     if ($retval != 0) {
-        return diagnoseInterpreterFailure($retval, $rc, $simpleLog, $advancedLog);
+        return diagnoseInterpreterFailure($retval, $rc, $simpleLog, $advancedLog, $path);
+    }
+
+    // The parser should have failed, but did not
+    if ($rc != 0) {
+        $simpleLog .= "Interpreter succeeded, but should have failed\n";
+        $advancedLog .= "<p>Interpreter succeeded, but should have exited with code $rc</p>";
+        $advancedLog .= getSrcLog($path);
+        return false;
     }
 
     // Compare the output using diff
-    // If this is parse-only, run jexamxml and return
-    if (array_key_exists('parse-only', $options)) {
-        $jexamxml = $options['jexampath'].'/jexamxml.jar';
-        $cmd = "diff $path.$intsuffix $path.out";
-        exec($cmd, $output, $retval);
+    $cmd = "diff $path.$intsuffix $path.out";
+    exec($cmd, $output, $retval);
 
-        if ($retval != 0) {
-            $simpleLog .= "The output does not match the reference.";
-            $advancedLog .= "The output does not match the reference.";
-            return false;
-        } else {
-            return true;
-        }
+    if ($retval != 0) {
+        diagnoseCmpFailure($path, 'int', $simpleLog, $advancedLog);
+        $advancedLog .= getHtmlContents("$path.in", "Interpreter STDIN");
+        return false;
+    } else {
+        return true;
     }
 }
 
@@ -196,6 +246,8 @@ function run($options) {
         if (preg_match('/.*\.src$/', $file)) {
             $path = substr($file, 0, -4);
 
+            fwrite(STDERR, "$path\n");
+
             checkFiles($path);
 
             $simpleLog = '';
@@ -208,42 +260,54 @@ function run($options) {
                 cleanup($path);
             }
 
-            // Add the simple log to the statistics table
-            if (!array_key_exists($simpleLog, $summaryTable)) {
-                $summaryTable[$simpleLog] = 0;
-            }
-            $summaryTable[$simpleLog]++;
-
             $numTests++;
-            $numErrors += $result ? 0 : 1;
 
             // If the test has failed save it to print later
-            if ($result == 0) {
+            if ($result == false) {
+                $numErrors++;
+
+                // Add the simple log to the statistics table
+                if (!array_key_exists($simpleLog, $summaryTable)) {
+                    $summaryTable[$simpleLog] = 0;
+                }
+                $summaryTable[$simpleLog]++;
+
+                // Generate the html for failed test
                 $testDiv .= "<div class=\"testview\">\n";
-                $testDiv .= " $path<br/>\n";
-                $testDiv .= "$advancedLog<br/>\n";
+
+                $testDiv .= "<p>$path</p>\n";
+                $testDiv .= $advancedLog;
                 $testDiv .= "</div>\n";
             }
         }
     }
 
     $passed = $numTests - $numErrors;
-    $totalPercentage = round($passed / $numTests);
+    $totalPercentage = round($passed / $numTests * 100);
 
     // Sort from the most common errors
     arsort($summaryTable);
     // Convert numbers to percentages
     foreach ($summaryTable as &$value) {
-        $value = round($value / $numTests * 100);
+        $value = round($value / $numErrors * 100);
     }
 
+    $color = ($numErrors == 0) ? 'green' : 'red';
+    echo "<p style=\"color:$color\">\n";
     echo "$passed out of $numTests ($totalPercentage%) tests passed\n";
-    foreach ($summaryTable as $description => $percentage) {
-        echo "$percentage% - $description";
-    }
+    echo "</p>";
 
-    // Print logs from individual tests
-    echo $testDiv;
+    if ($numErrors != 0) {
+        echo "<p>";
+        foreach ($summaryTable as $description => $percentage) {
+            echo "$percentage%\t$description<br/>";
+        }
+        echo "</p>";
+
+        // Print logs from individual tests
+        echo "<h3>Failed tests</h3>\n";
+        echo "<div>$testDiv</div>";
+    }
 }
 
 
@@ -270,21 +334,35 @@ function getOptions() {
     );
 
     $options = getopt($shortopts, $longopts);
-    $options += $defaults;
-    //var_dump($options);
 
-    if (array_key_exists('help', $options) or
-        array_key_exists('h', $options)) {
+    if (array_key_exists('help', $options) or array_key_exists('h', $options)) {
         usage();
         exit(0);
     }
 
-    if (array_key_exists('parse-only', $options) and
-        array_key_exists('int-only', $options)) {
-        echo '--parse-only and --int-only options cannot be combined';
-        exit(10);
+    if (array_key_exists('parse-only', $options)) {
+        if (array_key_exists('int-only', $options)) {
+            fwrite(STDERR, "--parse-only and --int-only options cannot be combined\n");
+            exit(ERR_BADARG);
+        }
+        if (array_key_exists('int-script', $options)) {
+            fwrite(STDERR, "--parse-only and --int-script options cannot be combined\n");
+            exit(ERR_BADARG);
+        }
     }
 
+    if (array_key_exists('int-only', $options)) {
+        if (array_key_exists('parse-only', $options)) {
+            fwrite(STDERR, "--int-only and --parse-only options cannot be combined\n");
+            exit(ERR_BADARG);
+        }
+        if (array_key_exists('parse-script', $options)) {
+            fwrite(STDERR, "--int-only and --parse-script options cannot be combined\n");
+            exit(ERR_BADARG);
+        }
+    }
+
+    $options += $defaults;
     return $options;
 }
 
@@ -299,7 +377,7 @@ echo '<!DOCTYPE html>
     <title>IPP test results</title>
     <style>
       body {
-        font-family: \'Helvetica\', \'Arial\', sans-serif;
+        font-family: "Helvetica", "Arial", sans-serif;
         color: #444444;
         background-color: #FAFAFA;
         background-color: Seashell;
@@ -311,6 +389,21 @@ echo '<!DOCTYPE html>
         border-radius: 8px;
         padding: 5px 30px;
         margin-bottom: 15px;
+      }
+
+      .codeview {
+        background-color: #444444;
+        color: white;
+        font-family: "Lucida Console", "Menlo", "Monaco", "Courier", monospace;
+        border-radius: 10px;
+        padding: 10px 15px;
+        margin-top: 0px;
+        margin-bottom: 15px;
+      }
+
+      .codeheading {
+        margin-bottom: 0px;
+        margin-left: 5px;
       }
 
     </style>
@@ -325,5 +418,3 @@ echo '  </body>
 </html>';
 
 ?>
-
-
