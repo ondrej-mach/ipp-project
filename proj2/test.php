@@ -4,6 +4,10 @@ const ERR_BADARG = 10;
 const ERR_INFILE = 11;
 const ERR_OUTFILE = 12;
 
+const ERR_BADPATH = 41;
+
+const PHP = 'php';
+const PYTHON = 'python3';
 
 function usage() {
     echo "--help Print this message.
@@ -148,6 +152,16 @@ function diagnoseCmpFailure($path, $outsuffix, &$simpleLog, &$advancedLog) {
     $advancedLog .= getSrcLog($path);
 }
 
+class SortedIterator extends SplHeap {
+    public function __construct(Iterator $iterator) {
+        foreach ($iterator as $item) {
+            $this->insert($item);
+        }
+    }
+    public function compare($b, $a) {
+        return strcmp($a->getRealpath(), $b->getRealpath());
+    }
+}
 
 function runTest($path, $options, &$simpleLog, &$advancedLog) {
     $xmlsuffix = 'xml';
@@ -160,6 +174,11 @@ function runTest($path, $options, &$simpleLog, &$advancedLog) {
 
     // Parse the ippcode. If int-only is set, skip this stage
     if (!array_key_exists('int-only', $options)) {
+        if (!file_exists($options['parse-script'])) {
+            fwrite(STDERR, "Invalid path to parser: " . $options['parse-script'] . "\n");
+            exit(ERR_BADPATH);
+        }
+
         $cmd = "php ".$options['parse-script']." <$path.src >$path.$xmlsuffix 2>$path.err";
         exec($cmd, $output, $retval);
 
@@ -179,6 +198,10 @@ function runTest($path, $options, &$simpleLog, &$advancedLog) {
         }
 
         $jexamxml = $options['jexampath'].'/jexamxml.jar';
+        if (!file_exists($jexamxml)) {
+            fwrite(STDERR, "Invalid path to jexamxml: $path\n");
+            exit(ERR_BADPATH);
+        }
         $cmd = "java -jar $jexamxml $path.$xmlsuffix $path.out 2>/dev/null";
         exec($cmd, $output, $retval);
 
@@ -196,7 +219,10 @@ function runTest($path, $options, &$simpleLog, &$advancedLog) {
     } else {
         $srcfile = "$path.xml";
     }
-
+    if (!file_exists($options['int-script'])) {
+        fwrite(STDERR, "Invalid path to interpreter: $path\n");
+        exit(ERR_BADPATH);
+    }
     $cmd = "python3 ".$options['int-script']." --source=$srcfile <$path.in >$path.$intsuffix 2>$path.err";
     exec($cmd, $output, $retval);
 
@@ -211,7 +237,6 @@ function runTest($path, $options, &$simpleLog, &$advancedLog) {
         $advancedLog .= getSrcLog($path);
         return false;
     }
-
     // Compare the output using diff
     $cmd = "diff $path.$intsuffix $path.out";
     exec($cmd, $output, $retval);
@@ -225,61 +250,79 @@ function runTest($path, $options, &$simpleLog, &$advancedLog) {
     }
 }
 
-
-
-function run($options) {
-    if (array_key_exists('recursive', $options)) {
-        $rdi = new RecursiveDirectoryIterator($options['directory']);
-        $dirIterator = new RecursiveIteratorIterator($rdi);
-    } else {
-        $dirIterator = new DirectoryIterator($options['directory']);
+function getPathArray($root, $recursive) {
+    if (!file_exists($root)) {
+        fwrite(STDERR, "Invalid path: $root\n");
+        exit(ERR_BADPATH);
     }
 
-    $testDiv = '';
+    if ($recursive) {
+        $rdi = new RecursiveDirectoryIterator($root);
+        $dirIterator = new RecursiveIteratorIterator($rdi);
+    } else {
+        $dirIterator = new DirectoryIterator($root);
+    }
 
+    $arr = [];
+
+    foreach ($dirIterator as $file) {
+        if ($file->getExtension() == 'src') {
+            $testname = $file->getPath() . '/' . $file->getFilename();
+            $testname = substr($testname, 0, -4);
+            array_push($arr, $testname);
+        }
+    }
+
+    sort($arr);
+    return $arr;
+}
+
+function run($options) {
+    $testDiv = '';
     $summaryTable = [];
     $numTests = 0;
     $numErrors = 0;
 
-    foreach ($dirIterator as $file) {
-        // last chcaracters of filename are .src
-        if (preg_match('/.*\.src$/', $file)) {
-            $path = substr($file, 0, -4);
+    $pathArray = getPathArray($options['directory'], array_key_exists('recursive', $options));
 
-            fwrite(STDERR, "$path\n");
+    foreach ($pathArray as $path) {
+        fwrite(STDERR, "$path\n");
+        checkFiles($path);
 
-            checkFiles($path);
+        $simpleLog = '';
+        $advancedLog = '';
 
-            $simpleLog = '';
-            $advancedLog = '';
+        // Run the test, collect the logs
+        $result = runTest($path, $options, $simpleLog, $advancedLog);
 
-            // Run the test, collect the logs
-            $result = runTest($path, $options, $simpleLog, $advancedLog);
-
-            if (!array_key_exists('noclean', $options)) {
-                cleanup($path);
-            }
-
-            $numTests++;
-
-            // If the test has failed save it to print later
-            if ($result == false) {
-                $numErrors++;
-
-                // Add the simple log to the statistics table
-                if (!array_key_exists($simpleLog, $summaryTable)) {
-                    $summaryTable[$simpleLog] = 0;
-                }
-                $summaryTable[$simpleLog]++;
-
-                // Generate the html for failed test
-                $testDiv .= "<div class=\"testview\">\n";
-
-                $testDiv .= "<p>$path</p>\n";
-                $testDiv .= $advancedLog;
-                $testDiv .= "</div>\n";
-            }
+        if (!array_key_exists('noclean', $options)) {
+            cleanup($path);
         }
+
+        $numTests++;
+
+        // If the test has failed save it to print later
+        if ($result == false) {
+            $numErrors++;
+
+            // Add the simple log to the statistics table
+            if (!array_key_exists($simpleLog, $summaryTable)) {
+                $summaryTable[$simpleLog] = 0;
+            }
+            $summaryTable[$simpleLog]++;
+
+            // Generate the html for failed test
+            $testDiv .= "<div class=\"testview\">\n";
+
+            $testDiv .= "<p>$path</p>\n";
+            $testDiv .= $advancedLog;
+            $testDiv .= "</div>\n";
+        }
+    }
+
+    if ($numTests == 0) {
+        fwrite(STDERR, "No tests were found in directory `" . $options['directory'] . "`\n");
+        exit(0);
     }
 
     $passed = $numTests - $numErrors;
@@ -292,6 +335,7 @@ function run($options) {
         $value = round($value / $numErrors * 100);
     }
 
+    printHeader();
     $color = ($numErrors == 0) ? 'green' : 'red';
     echo "<p style=\"color:$color\">\n";
     echo "$passed out of $numTests ($totalPercentage%) tests passed\n";
@@ -308,6 +352,7 @@ function run($options) {
         echo "<h3>Failed tests</h3>\n";
         echo "<div>$testDiv</div>";
     }
+    printFooter();
 }
 
 
@@ -330,7 +375,7 @@ function getOptions() {
         'directory' => '.',
         'parse-script' => 'parse.php',
         'int-script' => 'interpret.py',
-        'jexampath' => '/pub/courses/ipp/jexamxml',
+        'jexampath' => '/pub/courses/ipp/jexamxml/',
     );
 
     $options = getopt($shortopts, $longopts);
@@ -366,55 +411,60 @@ function getOptions() {
     return $options;
 }
 
+function printHeader() {
+    echo '<!DOCTYPE html>
+    <html lang="">
+    <head>
+        <meta charset="utf-8">
+        <title>IPP test results</title>
+        <style>
+        body {
+            font-family: "Helvetica", "Arial", sans-serif;
+            color: #444444;
+            background-color: #FAFAFA;
+            background-color: Seashell;
+            padding: 15px 40px;
+        }
+
+        .testview {
+            background-color: White;
+            border-radius: 8px;
+            padding: 5px 30px;
+            margin-bottom: 15px;
+        }
+
+        .codeview {
+            background-color: #444444;
+            color: white;
+            font-family: "Lucida Console", "Menlo", "Monaco", "Courier", monospace;
+            border-radius: 10px;
+            padding: 10px 15px;
+            margin-top: 0px;
+            margin-bottom: 15px;
+        }
+
+        .codeheading {
+            margin-bottom: 0px;
+            margin-left: 5px;
+        }
+
+        </style>
+    </head>
+
+    <body>
+        <h1>Test results</h1>';
+}
+
+function printFooter() {
+    echo " </body></html>\n";
+}
+
 ini_set('display_errors', 'stderr');
 
 $options = getOptions();
 
-echo '<!DOCTYPE html>
-<html lang="">
-  <head>
-    <meta charset="utf-8">
-    <title>IPP test results</title>
-    <style>
-      body {
-        font-family: "Helvetica", "Arial", sans-serif;
-        color: #444444;
-        background-color: #FAFAFA;
-        background-color: Seashell;
-        padding: 15px 40px;
-      }
-
-      .testview {
-        background-color: White;
-        border-radius: 8px;
-        padding: 5px 30px;
-        margin-bottom: 15px;
-      }
-
-      .codeview {
-        background-color: #444444;
-        color: white;
-        font-family: "Lucida Console", "Menlo", "Monaco", "Courier", monospace;
-        border-radius: 10px;
-        padding: 10px 15px;
-        margin-top: 0px;
-        margin-bottom: 15px;
-      }
-
-      .codeheading {
-        margin-bottom: 0px;
-        margin-left: 5px;
-      }
-
-    </style>
-  </head>
-
-  <body>
-    <h1>Test results</h1>';
-
 run($options);
 
-echo '  </body>
-</html>';
+
 
 ?>

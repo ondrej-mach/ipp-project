@@ -11,7 +11,8 @@ const ERR_LEXSYN = 23;
 $order = 1;
 
 function usage() {
-    echo "XD";
+    echo "Reads IPPcode from stdin and prints XML representation on stdout.
+    options: --help Prints this message\n";
 }
 
 // returns [parsed, type]

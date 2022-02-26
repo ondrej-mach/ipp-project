@@ -9,6 +9,8 @@ import re
 class InterpretError(Exception):
     retval = 59
 
+class InFileError(InterpretError):
+    retval = 11
 
 class MalformedXMLError(InterpretError):
     retval = 31
@@ -183,7 +185,7 @@ class Symbol:
 
 
 class RuntimeEnvironment:
-    def __init__(self, root: ET.Element, output=sys.stdout, error=sys.stderr):
+    def __init__(self, root: ET.Element, output=sys.stdout, error=sys.stderr, input_file=sys.stdin):
         self.set_vars()
 
         if root.tag != 'program':
@@ -205,6 +207,7 @@ class RuntimeEnvironment:
 
         self.output = output
         self.error = error
+        self.input_file = input_file
 
     def set_vars(self):
         self.ip = 0  # instruction pointer
@@ -459,23 +462,34 @@ class RuntimeEnvironment:
         elif inst.opcode == 'READ':
             op = ''
             symtype = inst.arg2.text
+            input_equivalent = ''
+            failed = False
 
             try:
-                if symtype == 'int':
-                    op = int(input())
+                # Do exactly what the input() function does
+                try:
+                    line = self.input_file.readline()
+                except:
+                    raise InFileError()
 
-                elif symtype == 'string':
-                    op = str(input())
-
-                elif symtype == 'bool':
-                    op = str(input()).lower() == 'true'
-
+                if line:
+                    input_equivalent = line.rstrip()
                 else:
-                    Exception('Cannot read this type')
+                    raise ValueError
 
-            except:
+                if symtype == 'int':
+                    op = int(input_equivalent)
+                elif symtype == 'string':
+                    op = str(input_equivalent)
+                elif symtype == 'bool':
+                    op = str(input_equivalent).lower() == 'true'
+                else:
+                    raise UnexpectedXMLError('Cannot read this type')
+
+            except ValueError:
                 op = 'nil'
                 symtype = 'nil'
+
 
             result = Symbol(op, symtype, interpret=False)
             self.setVariableValue(inst.arg1.text, result)
@@ -591,7 +605,8 @@ def main():
     args = parser.parse_args()
 
     if args.source is None and args.input is None:
-        parser.error('At least one of the arguments is required ')
+        sys.stderr.write('At least one of the arguments is required.\n')
+        return 10
 
     if args.source:
         try:
@@ -600,7 +615,7 @@ def main():
             xml_file.close()
         except:
             sys.stderr.write('Source file cannot be opened.\n')
-            return 1
+            return 11
     else:
         xml_str = sys.stdin.read()
 
@@ -608,10 +623,19 @@ def main():
         root = ET.fromstring(xml_str)
     except:
         sys.stderr.write('Invalid XML format, cannot parse.\n')
-        return 31
+        return MalformedXMLError.retval
+
+    if args.input:
+        try:
+            input_file = open(args.input, 'r')
+        except:
+            sys.stderr.write('Input file cannot be opened.\n')
+            return 11
+    else:
+        input_file = sys.stdin
 
     try:
-        rtenv = RuntimeEnvironment(root)
+        rtenv = RuntimeEnvironment(root, input_file=input_file)
         return rtenv.run_program()
 
     except InterpretError as e:
