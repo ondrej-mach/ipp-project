@@ -6,7 +6,7 @@ const ERR_OUTFILE = 12;
 
 const ERR_BADPATH = 41;
 
-const PHP = 'php';
+const PHP = 'php8.1';
 const PYTHON = 'python3';
 
 function usage() {
@@ -179,7 +179,7 @@ function runTest($path, $options, &$simpleLog, &$advancedLog) {
             exit(ERR_BADPATH);
         }
 
-        $cmd = "php ".$options['parse-script']." <$path.src >$path.$xmlsuffix 2>$path.err";
+        $cmd = PHP." ".$options['parse-script']." <$path.src >$path.$xmlsuffix 2>$path.err";
         exec($cmd, $output, $retval);
 
         if ($retval != 0) {
@@ -223,7 +223,7 @@ function runTest($path, $options, &$simpleLog, &$advancedLog) {
         fwrite(STDERR, "Invalid path to interpreter: $path\n");
         exit(ERR_BADPATH);
     }
-    $cmd = "python3 ".$options['int-script']." --source=$srcfile <$path.in >$path.$intsuffix 2>$path.err";
+    $cmd = PYTHON." ".$options['int-script']." --source=$srcfile <$path.in >$path.$intsuffix 2>$path.err";
     exec($cmd, $output, $retval);
 
     if ($retval != 0) {
