@@ -152,17 +152,6 @@ function diagnoseCmpFailure($path, $outsuffix, &$simpleLog, &$advancedLog) {
     $advancedLog .= getSrcLog($path);
 }
 
-class SortedIterator extends SplHeap {
-    public function __construct(Iterator $iterator) {
-        foreach ($iterator as $item) {
-            $this->insert($item);
-        }
-    }
-    public function compare($b, $a) {
-        return strcmp($a->getRealpath(), $b->getRealpath());
-    }
-}
-
 function runTest($path, $options, &$simpleLog, &$advancedLog) {
     $xmlsuffix = 'xml';
     $intsuffix = 'int';
